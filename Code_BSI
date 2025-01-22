@@ -1,0 +1,128 @@
+# ╔═╡ 0f2039a0-d878-11ef-0a62-cd8b81998184
+begin
+	import Pkg; Pkg.activate()
+	using CairoMakie, Turing, DataFrames, PlutoUI, CSV, Statistics, StatsBase, ColorSchemes
+
+	update_theme!(fontsize=18, resolution=(0.9*500, 0.9*380))
+end
+
+
+# ╔═╡ ae4a77a5-72fc-4b4f-bae1-51b91d503b3b
+# model for lime temperature
+function θ(t, λ, θ₀, θᵃⁱʳ)
+    if t < 0.0
+        return θ₀
+    end
+    return θᵃⁱʳ + (θ₀ - θᵃⁱʳ) * exp(-t / λ)
+end
+
+# ╔═╡ 9fe4710e-b134-4cdf-9cd9-1f6149d1ad55
+θ₀_obs = 6.54 # °C
+
+# ╔═╡ 0c58c219-2325-4047-bc92-446c8b93e86a
+θᵃⁱʳ_obs = 18.47 # °C
+
+# ╔═╡ 18297a0c-800f-4c59-b14d-6144e8d3f80d
+data = CSV.read("lime.csv",DataFrame)
+
+# ╔═╡ 10f7682b-d3fd-418d-a6c5-5f0f72afc112
+begin
+	local fig = Figure()
+	local ax = Axis(fig[1,1], xlabel = "Time, t [hr]", ylabel = "Lime Temp, θ [°C]")
+	scatter!(data[:,"t [hr]"],data[:,"θ_obs [°C]"], color = Cycled(4), 
+	label=rich("{(t", subscript("i"), ", θ", subscript("i, obs"), ")}"))
+	scatter!([0], [θ₀_obs], color=Cycled(4))
+	hlines!([θᵃⁱʳ_obs], color=Cycled(3), linestyle=:dash, 
+		label=rich("θ", superscript("air"), subscript("obs")))
+	axislegend(position=:rb)
+	
+	fig
+end
+		
+	
+	
+
+# ╔═╡ 3bbf014c-7328-4c02-9efb-bbc52874ed60
+# implementation in Turing.jl, for specifiying prior and forward model
+@model function measure_lime_temp_time_series(data)
+    # prior distributions
+	λ    ~ truncated(Normal(1.0, 0.3), 0.0, nothing) # hr
+    σ    ~ Uniform(0.0, 1.0) # °C
+    θ₀   ~ Normal(θ₀_obs, σ) # °C
+    θᵃⁱʳ ~ Normal(θᵃⁱʳ_obs, σ) # °C
+
+    # probabilistic forward model
+    for i = 1:nrow(data)
+		# the time stamp
+        tᵢ = data[i, "t [hr]"]
+		# the model prediction
+        θ̄ = θ(tᵢ, λ, θ₀, θᵃⁱʳ)
+		# the probabilistic forward model
+        data[i, "θ_obs [°C]"] ~ Normal(θ̄, σ)
+	end
+end
+
+# ╔═╡ 7067a387-30f0-4f36-be19-f8927bc97c5b
+begin
+	mlts_model = measure_lime_temp_time_series(data)
+		
+	nb_samples = 2_500 # per chain
+	nb_chains = 4      # independent chains
+	chain = DataFrame(
+		sample(mlts_model, NUTS(), MCMCSerial(), nb_samples, nb_chains)
+	)
+end
+
+# ╔═╡ ba19e5ed-8ca7-41e2-a23f-2e3939332120
+begin
+	local fig = Figure()
+	local ax = Axis(fig[1, 1], xlabel="λ [hr]", ylabel="# samples")
+	for (i, c) in enumerate(groupby(chain, "chain"))
+		hist!(c[:, "λ"], color=(ColorSchemes.Accent_4[i], 0.5))
+	end
+	fig
+end
+
+# ╔═╡ 9580e292-a482-4c3d-bfaa-e9ffeb5a0c51
+μ_λ = mean(chain[:, "λ"]) # hr
+
+# ╔═╡ 346d62dd-cf2d-475f-b39b-44799f817d3e
+σ_λ = std(chain[:, "λ"]) # hr
+
+# ╔═╡ 477e15f0-2bf3-400f-91f7-5e130def4503
+ci_λ = [percentile(chain[:, "λ"], 5.0), percentile(chain[:, "λ"], 95.0)]
+
+# ╔═╡ 29fada93-b13e-42eb-90ae-b840f9a44d0e
+begin
+	local fig = Figure(size = (800, 600))
+	local ax  = Axis(fig[1, 1], xlabel="λ [hr]", ylabel="# samples", 
+		title="posterior dist'n of Λ")
+	hist!(chain[:, :λ])
+	ylims!(0, nothing)
+	vlines!([μ_λ], linestyle=:dash, color=Cycled(2))
+	lines!(ci_λ, zeros(2), color="black", linewidth=10)
+	fig
+end
+
+# ╔═╡ 03020d36-facb-4a5d-a5b9-78cba0a19f8d
+begin
+	local fig = Figure()
+	local ax  = Axis(fig[1, 1], xlabel="time, t [hr]", 
+		ylabel="lime temperature, θ [°C]")
+
+	n_trajectories = 25
+	t = range(-0.2, 10.0, length=100)
+	for row in eachrow(chain)
+		lines!(ax, t, θ.(t, row[:λ], row[:θ₀], row[:θᵃⁱʳ]), 
+			color=("orange", 0.05))
+	end
+	scatter!(data[:, "t [hr]"], data[:, "θ_obs [°C]"], color=Cycled(1),
+		label=rich("{(t", subscript("i"), ", θ", subscript("i, obs"), ")}"))
+	scatter!([0], [θ₀_obs], color=Cycled(1))
+	hlines!([θᵃⁱʳ_obs], color=Cycled(3), linestyle=:dash, 
+		label=rich("θ", superscript("air"), subscript("obs")))
+	axislegend(position=:rb)
+
+	xlims!(-0.2, 10)
+	fig
+end
